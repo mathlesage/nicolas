@@ -18,8 +18,8 @@ from discord.ext import commands
 # GUILD_ID="1101494689649152010"  (Run it back)
 # TARGET_USER_ID="313356139163156493"  (justnexio)
 DISCORD_TOKEN = st.secrets.get("DISCORD_TOKEN", os.getenv("DISCORD_TOKEN", ""))
-TARGET_GUILD_ID = int(st.secrets.get("GUILD_ID", "0"))
-TARGET_USER_ID = int(st.secrets.get("TARGET_USER_ID", "0"))
+TARGET_GUILD_ID = 1101494689649152010
+TARGET_USER_ID = 313356139163156493
 
 if not DISCORD_TOKEN:
     st.error("DISCORD_TOKEN manquant. Ajoute-le dans Streamlit Secrets.")
