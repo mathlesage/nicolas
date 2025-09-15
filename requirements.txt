@@ -2,3 +2,4 @@ discord.py==2.3.2
 aiohttp==3.9.5
 yarl==1.9.4
 multidict==6.0.5
+audioop-lts>=0.2
