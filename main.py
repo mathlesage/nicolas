@@ -1,5 +1,4 @@
 
-
 # =============================
 # main.py (Streamlit + Discord bot)
 # =============================
@@ -18,8 +17,8 @@ from discord.ext import commands
 # GUILD_ID="1101494689649152010"  (Run it back)
 # TARGET_USER_ID="313356139163156493"  (justnexio)
 DISCORD_TOKEN = st.secrets.get("DISCORD_TOKEN", os.getenv("DISCORD_TOKEN", ""))
-TARGET_GUILD_ID = 1101494689649152010
-TARGET_USER_ID = 313356139163156493
+TARGET_GUILD_ID = int(st.secrets.get("GUILD_ID", "0"))
+TARGET_USER_ID = int(st.secrets.get("TARGET_USER_ID", "0"))
 
 if not DISCORD_TOKEN:
     st.error("DISCORD_TOKEN manquant. Ajoute-le dans Streamlit Secrets.")
@@ -256,17 +255,19 @@ if st.button("Démarrer / Redémarrer le bot", use_container_width=True):
 # ================= Quick Actions (4 gros boutons) =================
 # Helpers pour exécuter une coroutine sur la boucle du bot
 
-def run_on_bot_loop(coro, timeout=20):
+def run_on_bot_loop_fn(fn, timeout=20):
+    # fn: callable -> coroutine (créée seulement si le bot tourne)
     if not (st.session_state.bot_thread and st.session_state.bot_thread.is_alive()):
         return False, "Le bot n'est pas démarré."
     try:
+        coro = fn()
         fut = asyncio.run_coroutine_threadsafe(coro, bot.loop)
         res = fut.result(timeout=timeout)
         return True, res or "OK"
     except Exception as e:
         return False, str(e)
 
-async def _get_targets():
+async def _get_targets():():
     guild = bot.get_guild(TARGET_GUILD_ID)
     if guild is None:
         try:
@@ -303,20 +304,20 @@ st.subheader("Actions rapides sur justnexio")
 col1, col2 = st.columns(2)
 with col1:
     if st.button("🚫 BAN justnexio", use_container_width=True):
-        ok, msg = run_on_bot_loop(do_ban())
+        ok, msg = run_on_bot_loop_fn(do_ban)
         (st.success if ok else st.error)(msg)
     if st.button("🔇 MUTE justnexio", use_container_width=True):
-        ok, msg = run_on_bot_loop(do_mute())
+        ok, msg = run_on_bot_loop_fn(do_mute)
         (st.success if ok else st.error)(msg)
 with col2:
     if st.button("🔕 DEAFEN justnexio", use_container_width=True):
-        ok, msg = run_on_bot_loop(do_deafen())
+        ok, msg = run_on_bot_loop_fn(do_deafen)
         (st.success if ok else st.error)(msg)
     if st.button("🔌 DISCONNECT justnexio", use_container_width=True):
-        ok, msg = run_on_bot_loop(do_disconnect())
+        ok, msg = run_on_bot_loop_fn(do_disconnect)
         (st.success if ok else st.error)(msg)
 
-st.markdown(
+st.markdown((
     """
     **Commandes actives (slash) également disponibles**
     - /ban · /mute · /unmute · /deafen · /undeafen · /move · /disconnect
