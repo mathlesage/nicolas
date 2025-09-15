@@ -267,7 +267,7 @@ def run_on_bot_loop_fn(fn, timeout=20):
     except Exception as e:
         return False, str(e)
 
-async def _get_targets():():
+async def _get_targets():
     guild = bot.get_guild(TARGET_GUILD_ID)
     if guild is None:
         try:
@@ -317,7 +317,7 @@ with col2:
         ok, msg = run_on_bot_loop_fn(do_disconnect)
         (st.success if ok else st.error)(msg)
 
-st.markdown((
+st.markdown(
     """
     **Commandes actives (slash) également disponibles**
     - /ban · /mute · /unmute · /deafen · /undeafen · /move · /disconnect
