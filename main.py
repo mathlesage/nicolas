@@ -2,15 +2,14 @@
 import os
 import threading
 import asyncio
+import time
 import streamlit as st
 
 import discord
 from discord.ext import commands
 from discord import app_commands
 
-# -------------------------------------------------------
-# Configuration / Secrets
-# -------------------------------------------------------
+# ==================== Config / Secrets ====================
 TOKEN = st.secrets.get("DISCORD_TOKEN", os.getenv("DISCORD_TOKEN", ""))
 TARGET_GUILD_ID = int(st.secrets.get("GUILD_ID", os.getenv("GUILD_ID", "0")) or 0)
 TARGET_USER_ID = int(st.secrets.get("TARGET_USER_ID", os.getenv("TARGET_USER_ID", "0")) or 0)
@@ -24,39 +23,42 @@ if not TOKEN:
 if not TARGET_GUILD_ID or not TARGET_USER_ID:
     st.warning("GUILD_ID ou TARGET_USER_ID manquant dans Secrets. Les actions seront bloquées.")
 
-# Option de diagnostic pour se connecter sans l'intent Members (test connexion)
+# ==================== État global thread-safe (pas de Streamlit dans le thread) ====================
+STATE = {
+    "connected": False,        # mis à True sur on_ready
+    "bot_user": "",            # nom#discrim du bot
+    "last_error": "",          # dernier message d'erreur lisible
+}
+STATE_LOCK = threading.Lock()
+
+def set_state(**kwargs):
+    with STATE_LOCK:
+        STATE.update(kwargs)
+
+def get_state():
+    with STATE_LOCK:
+        return dict(STATE)
+
+# ==================== Options ====================
 with st.sidebar:
     st.header("Options")
     test_without_members_intent = st.checkbox(
         "Mode test: démarrer sans Members Intent",
         value=False,
-        help="Utile pour vérifier la connexion si tu n'as pas encore activé Server Members Intent dans le portail."
+        help="Utilise-le pour vérifier la connexion si tu n'as pas encore activé Server Members Intent."
+    )
+    autorefresh = st.checkbox(
+        "Rafraîchir l’état toutes les 2 s",
+        value=True,
+        help="Actualise l'UI pour refléter rapidement le statut on_ready."
     )
 
-# -------------------------------------------------------
-# État persistant Streamlit
-# -------------------------------------------------------
-if "bot_thread" not in st.session_state:
-    st.session_state.bot_thread = None
-if "bot_connected" not in st.session_state:
-    st.session_state.bot_connected = False
-if "bot_user" not in st.session_state:
-    st.session_state.bot_user = ""
-if "last_error" not in st.session_state:
-    st.session_state.last_error = ""
-if "bot" not in st.session_state:
-    st.session_state.bot = None
-if "intent_mode" not in st.session_state:
-    st.session_state.intent_mode = None  # "with_members" / "no_members"
-
-# -------------------------------------------------------
-# Création du bot (une seule fois par mode d'intents)
-# -------------------------------------------------------
+# ==================== Bot factory ====================
 def make_bot(with_members: bool) -> commands.Bot:
     intents = discord.Intents.none()
     intents.guilds = True
     intents.voice_states = True
-    intents.members = bool(with_members)
+    intents.members = bool(with_members)  # True = nécessite Server Members Intent activé côté portail
 
     bot = commands.Bot(command_prefix="!", intents=intents)
     tree = bot.tree
@@ -67,9 +69,7 @@ def make_bot(with_members: bool) -> commands.Bot:
 
     @bot.event
     async def on_ready():
-        # marquer l'état réel de connexion
-        st.session_state.bot_connected = True
-        st.session_state.bot_user = str(bot.user)
+        set_state(connected=True, bot_user=str(bot.user))
         try:
             if TARGET_GUILD_ID:
                 await tree.sync(guild=discord.Object(id=TARGET_GUILD_ID))
@@ -81,26 +81,32 @@ def make_bot(with_members: bool) -> commands.Bot:
 
     @bot.event
     async def on_disconnect():
-        st.session_state.bot_connected = False
+        set_state(connected=False)
 
     @bot.event
     async def on_resumed():
-        st.session_state.bot_connected = True
+        set_state(connected=True)
 
     return bot
 
+# ==================== Singleton bot par mode d’intents ====================
+if "intent_mode" not in st.session_state:
+    st.session_state.intent_mode = None
+if "bot_instance" not in st.session_state:
+    st.session_state.bot_instance = None
+if "bot_thread" not in st.session_state:
+    st.session_state.bot_thread = None
+
 desired_mode = "no_members" if test_without_members_intent else "with_members"
-if st.session_state.bot is None or st.session_state.intent_mode != desired_mode:
-    # Si on change le mode d'intents, on force un nouveau bot (redémarrage conseillé)
-    st.session_state.bot = make_bot(with_members=(desired_mode == "with_members"))
+if st.session_state.intent_mode != desired_mode or st.session_state.bot_instance is None:
     st.session_state.intent_mode = desired_mode
-    # on marquera connecté quand on recevra on_ready
+    st.session_state.bot_instance = make_bot(with_members=(desired_mode == "with_members"))
+    # reset état connexion (sera fixé par on_ready)
+    set_state(connected=False, bot_user="")
 
-bot: commands.Bot = st.session_state.bot
+bot: commands.Bot = st.session_state.bot_instance
 
-# -------------------------------------------------------
-# Helpers asynchrones
-# -------------------------------------------------------
+# ==================== Actions asynchrones ====================
 async def _get_targets():
     if not bot.is_ready():
         raise RuntimeError("Le bot n'est pas connecté.")
@@ -136,15 +142,16 @@ async def do_disconnect():
     await member.move_to(None)
     return f"{member.display_name} déconnecté du vocal."
 
-# -------------------------------------------------------
-# Exécution sur la boucle du bot
-# -------------------------------------------------------
+# ==================== Exécuter sur la boucle du bot ====================
 def run_on_bot_loop_coro(make_coro, timeout: int = 20):
     thread = st.session_state.bot_thread
     if not (thread and thread.is_alive()):
         return False, "Le bot n'est pas démarré (thread)."
-    if not st.session_state.bot_connected or not bot.is_ready():
+
+    s = get_state()
+    if not s["connected"] or not bot.is_ready():
         return False, "Le bot n'est pas connecté (gateway). Vérifie l’intent Members et le token."
+
     try:
         fut = asyncio.run_coroutine_threadsafe(make_coro(), bot.loop)
         res = fut.result(timeout)
@@ -156,78 +163,76 @@ def run_on_bot_loop_coro(make_coro, timeout: int = 20):
     except Exception as e:
         return False, str(e)
 
-# -------------------------------------------------------
-# Lancement du bot dans un thread
-# -------------------------------------------------------
+# ==================== Lancement du bot en thread ====================
 def run_bot_forever():
     try:
         asyncio.run(bot.start(TOKEN))
     except discord.errors.PrivilegedIntentsRequired:
-        st.session_state.last_error = (
-            "Intents requis non activés : active Server Members Intent "
-            "dans Developer Portal → Bot → Privileged Gateway Intents, puis Save. "
-            "Assure-toi aussi que le TOKEN vient de la même application."
+        set_state(
+            connected=False,
+            bot_user="",
+            last_error=(
+                "Intents requis non activés : coche **Server Members Intent** "
+                "dans Developer Portal → Bot → Privileged Gateway Intents, puis Save. "
+                "Assure-toi aussi que le TOKEN vient de la même application."
+            ),
         )
-        st.session_state.bot_connected = False
     except Exception as e:
-        st.session_state.last_error = f"Erreur de lancement du bot : {e}"
-        st.session_state.bot_connected = False
+        set_state(connected=False, bot_user="", last_error=f"Erreur de lancement du bot : {e}")
 
-# -------------------------------------------------------
-# UI Statut et contrôle
-# -------------------------------------------------------
 thread_alive = st.session_state.bot_thread is not None and st.session_state.bot_thread.is_alive()
-connected = thread_alive and st.session_state.bot_connected
-
-c1, c2 = st.columns(2)
-with c1:
-    st.metric("Thread bot", "Oui" if thread_alive else "Non")
-with c2:
-    st.metric("Connecté à Discord", "Oui" if connected else "Non")
-if st.session_state.bot_user:
-    st.write(f"Compte bot : {st.session_state.bot_user}")
-
 if st.button("Démarrer / Redémarrer le bot", use_container_width=True):
     if thread_alive:
         st.info("Le bot tourne déjà.")
     else:
-        st.session_state.last_error = ""
-        t = threading.Thread(target=run_bot_forever, daemon=True)
+        # clear erreurs précédentes
+        set_state(last_error="")
+        t = threading.Thread(target=run_bot_forever, daemon=True, name="run_bot_forever")
         t.start()
         st.session_state.bot_thread = t
         st.success("Démarrage demandé. Attends l’état Connecté = Oui.")
 
-if st.session_state.last_error:
-    st.error(st.session_state.last_error)
+# ==================== Statut & auto-refresh ====================
+s = get_state()
+colA, colB, colC = st.columns(3)
+with colA:
+    st.metric("Thread bot", "Oui" if thread_alive else "Non")
+with colB:
+    st.metric("Connecté à Discord", "Oui" if s["connected"] else "Non")
+with colC:
+    st.metric("Mode intents", "Sans members" if desired_mode == "no_members" else "Avec members")
+
+if s["bot_user"]:
+    st.write(f"Compte bot : **{s['bot_user']}**")
+if s.get("last_error"):
+    st.error(s["last_error"])
+
+if autorefresh:
+    st.experimental_set_query_params(_=str(time.time()))  # force un refresh léger
+    st.experimental_rerun()  # relance le script pour récupérer l'état mis à jour
 
 st.divider()
 
-# -------------------------------------------------------
-# Actions rapides (4 gros boutons) sur justnexio
-# -------------------------------------------------------
+# ==================== 4 gros boutons ====================
 st.subheader("Actions rapides sur justnexio")
-
 col1, col2 = st.columns(2)
 with col1:
-    if st.button("BAN justnexio", use_container_width=True):
+    if st.button("🚫 BAN justnexio", use_container_width=True):
         ok, msg = run_on_bot_loop_coro(lambda: do_ban())
         (st.success if ok else st.error)(msg)
-
-    if st.button("MUTE justnexio", use_container_width=True):
+    if st.button("🔇 MUTE justnexio", use_container_width=True):
         ok, msg = run_on_bot_loop_coro(lambda: do_mute())
         (st.success if ok else st.error)(msg)
-
 with col2:
-    if st.button("DEAFEN justnexio", use_container_width=True):
+    if st.button("🔕 DEAFEN justnexio", use_container_width=True):
         ok, msg = run_on_bot_loop_coro(lambda: do_deafen())
         (st.success if ok else st.error)(msg)
-
-    if st.button("DISCONNECT justnexio", use_container_width=True):
+    if st.button("🔌 DISCONNECT justnexio", use_container_width=True):
         ok, msg = run_on_bot_loop_coro(lambda: do_disconnect())
         (st.success if ok else st.error)(msg)
 
 st.caption(
-    "Rappels : 1) Activer Server Members Intent dans le Developer Portal. "
-    "2) Inviter le bot sur Run it back avec les permissions Ban/Mute/Deafen/Move/Connect/View Channels/Use Application Commands. "
-    "3) Placer le rôle du bot au-dessus de celui de justnexio."
+    "1) Active **Server Members Intent** dans le Developer Portal. "
+    "2) Invite le bot sur **Run it back** avec Ban/Mute/Deafen/Move/Connect/View Channels/Use Application Commands. "
+    "3) Place le rôle du bot **au-dessus** de celui de justnexio."
 )
